@@ -33,8 +33,8 @@ def fetch_snmp_data():
     current_values = []
 
     # Print current OID values for debugging
-    for item in response:
-        print(f"SNMP Response value: {item.value}")
+    #for item in response:
+    #   print(f"SNMP Response value: {item.value}")
 
     # Check if the system has restarted
     if int(current_time) > 2**32 or int(current_time) <= 0:
