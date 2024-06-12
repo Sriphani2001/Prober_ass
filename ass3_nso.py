@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 import easysnmp
 from easysnmp import Session
 import sys, time, math
