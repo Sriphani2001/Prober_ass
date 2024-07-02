@@ -1,126 +1,150 @@
-#!/usr/bin/env python3
-import easysnmp
+#!/usr/bin/python3
+import sys
+import time
 from easysnmp import Session
-import sys, time, math
 
-# Extract agent details and command-line arguments
-agent_info = sys.argv[1]
-agent_details = agent_info.split(':')
-agent_ip = agent_details[0]
-agent_port = agent_details[1]
-agent_community = agent_details[2]
-sampling_frequency = float(sys.argv[2])
-sample_count = int(sys.argv[3])
-sampling_interval = 1 / sampling_frequency
-oids = []
+# Extract command line arguments
+target_info = sys.argv[1]
+target_addr, target_port, target_community = target_info.split(":")
+sample_rate = float(sys.argv[2])
+total_samples = int(sys.argv[3])
+time_step = 1 / sample_rate
 
-# Collect OIDs from command-line arguments
-for i in range(4, len(sys.argv)):
-    oids.append(sys.argv[i])
+# List of object identifiers (OIDs)
+object_identifiers = []
+prev_counter_vals = []
+prev_gauge_vals = []
+prev_octet_str_vals = []
+snmp_responses = []
+prev_uptime = 0
 
-# Add sysUpTime OID to the list of OIDs to be monitored
-oids.insert(0, '1.3.6.1.2.1.1.3.0')
+# Populate object identifiers from command line arguments
+for idx in range(4, len(sys.argv)):
+    object_identifiers.append(sys.argv[idx])
 
-# Initialize SNMP session
-session = Session(hostname=agent_ip, remote_port=agent_port,
-                  community=agent_community, version=2, timeout=1, retries=3)
+# Add sysUpTime OID to the beginning of the list
+object_identifiers.insert(0, '1.3.6.1.2.1.1.3.0')
 
-# Function to fetch SNMP data and calculate rates
-def fetch_snmp_data():
-    global previous_values, previous_time, last_printed_time
-    response = session.get(oids)
-    current_time = int(response[0].value) / 100
-    current_values = []
+# Create SNMP session
+snmp_conn = Session(hostname=target_addr, remote_port=target_port, community=target_community, version=2, timeout=1, retries=1)
 
-    # Print current OID values for debugging
-    #for item in response:
-    #   print(f"SNMP Response value: {item.value}")
+def process_responses(iter_count, measure_time):
+    global prev_counter_vals, prev_gauge_vals, prev_octet_str_vals, prev_uptime
 
-    # Check if the system has restarted
-    if int(current_time) > 2**32 or int(current_time) <= 0:
-        print("The system just restarted.")
+    curr_counter_vals = []
+    curr_gauge_vals = []
+    curr_octet_str_vals = []
 
-    # Process OID values from the response
-    for i in range(1, len(response)):
-        if response[i].value != 'NOSUCHOBJECT' and response[i].value != 'NOSUCHINSTANCE':
-            if response[i].snmp_type in ['COUNTER64', 'GAUGE', 'COUNTER']:
-                current_values.append(int(response[i].value))
-            else:
-                current_values.append(response[i].value)
+    # Print timestamp for each sample after the first one
+    if iter_count != 0:
+        print(f"{int(measure_time)} |", end='')
 
-            if count != 0 and len(previous_values) > 0:
-                if current_time > previous_time:
-                    if response[i].snmp_type in ['COUNTER', 'COUNTER32', 'COUNTER64']:
-                        oid_difference = int(current_values[i - 1]) - int(previous_values[i - 1])
-                        time_difference = (current_time - previous_time)
-                        rate = oid_difference / time_difference
+    # Extract valid responses
+    valid_data = [(resp.value, resp.snmp_type) 
+                  for resp in snmp_responses[1:] 
+                  if resp.value not in ['NOSUCHOBJECT', 'NOSUCHINSTANCE']]
+    
+    # Separate values by type
+    curr_gauge_vals = [int(val) for val, data_type in valid_data if data_type == 'GAUGE']
+    curr_counter_vals = [(int(val), data_type) for val, data_type in valid_data if data_type in ['COUNTER', 'COUNTER64']]
+    curr_octet_str_vals = [val for val, data_type in valid_data if data_type == 'OCTET_STR']
 
-                        # Handle counter wrap-around
-                        if rate < 0:
-                            if response[i].snmp_type == 'COUNTER32':
-                                oid_difference = oid_difference + (2**32)
-                            elif response[i].snmp_type == 'COUNTER64':
-                                oid_difference = oid_difference + (2**64)
-                            rate = oid_difference / time_difference
+    # Print gauge values and their deltas
+    if iter_count != 0 and prev_gauge_vals:
+        gauge_deltas = [(curr, curr - prev) for curr, prev in zip(curr_gauge_vals, prev_gauge_vals)]
+        for curr, delta in gauge_deltas:
+            print(f"{curr}({delta}) |", end='')
 
-                        try:
-                            if last_printed_time == str(timer2):
-                                print(round(rate), end="|")
-                            else:
-                                print(timer2, "|", round(rate), end="|")
-                                last_printed_time = str(timer2)
-                        except:
-                            print(timer2, "|", round(rate), end="|")
-                            last_printed_time = str(timer2)
-                    elif response[i].snmp_type == 'GAUGE':
-                        oid_difference = int(current_values[i - 1]) - int(previous_values[i - 1])
-                        oid_difference = "+" + str(oid_difference)
-                        try:
-                            if last_printed_time == str(timer2):
-                                print(current_values[-1], "(", oid_difference, ")", end="|")
-                            else:
-                                print(timer2, "|", current_values[-1], "(", oid_difference, ")", end="|")
-                                last_printed_time = str(timer2)
-                        except:
-                            print(timer2, "|", current_values[-1], "(", oid_difference, ")", end="|")
-                            last_printed_time = str(timer2)
-            else:
-                print("This seems like the system was restarted.")
-                break
+    # Print counter rates
+    if iter_count != 0 and prev_counter_vals:
+        counter_deltas = [(curr, curr - prev, data_type) for (curr, data_type), prev in zip(curr_counter_vals, prev_counter_vals)]
+        for curr, delta, data_type in counter_deltas:
+            # Handle counter wrap-around
+            if delta < 0:
+                delta += (2 ** 32) if data_type == 'COUNTER' else (2 ** 64)
+            time_delta = float(curr_uptime - prev_uptime)
+            rate = int(delta / time_delta)
+            print(f"{rate} |", end='')
 
-    previous_values = current_values
-    previous_time = current_time
+    # Print octet string values
+    if iter_count != 0 and prev_octet_str_vals:
+        for curr, prev in zip(curr_octet_str_vals, prev_octet_str_vals):
+            print(f"{curr} |", end='')
 
-# Initialize variables for the main loop
-previous_values = []
-previous_time = None
-last_printed_time = ""
+    # Update previous values for the next iteration
+    prev_counter_vals = [val for val, _ in curr_counter_vals]
+    prev_gauge_vals = curr_gauge_vals
+    prev_octet_str_vals = curr_octet_str_vals
+    prev_uptime = curr_uptime
 
-# Infinite sampling loop if sample_count is -1
-if sample_count == -1:
-    count = 0
+    if iter_count != 0:
+        print()
+
+# Continuous sampling if total_samples is -1
+if total_samples == -1:
+    iter_count = 0
     while True:
-        timer2 = time.time()
-        fetch_snmp_data()
-        if count != 0:
-            print()
-        response_time = time.time()
-        count += 1
-        if sampling_interval >= response_time - timer2:
-            time.sleep(sampling_interval - response_time + timer2)
-        else:
-            n = math.ceil((response_time - timer2) / sampling_interval)
-            time.sleep((n * sampling_interval) - response_time + timer2)
+        measure_time = time.time()
+        snmp_responses = snmp_conn.get(object_identifiers)
+        curr_uptime = int(snmp_responses[0].value) / 100
+        detect_reset = lambda: curr_uptime < prev_uptime and iter_count != 0
+        
+        # Handle agent reset
+        if detect_reset():
+            print("Agent has RESET")
+            prev_uptime = curr_uptime
+            prev_counter_vals = []
+            prev_gauge_vals = []
+            prev_octet_str_vals = []
+            continue
+        
+        process_responses(iter_count, measure_time)
+        end_time = time.time()
+        iter_count += 1
+
+        # Sleep until the next sample time
+        delay_until = lambda target_time: time.time() < target_time
+        while delay_until(measure_time + time_step):
+            pass
+
+        # Adjust sleep time if processing took longer than time_step
+        if end_time - measure_time > time_step:
+            mult = 1
+            adjusted_step = lambda m: m * time_step
+            while end_time - measure_time > adjusted_step(mult):
+                mult += 1
+            while delay_until(measure_time + adjusted_step(mult)):
+                pass
 else:
-    # Sampling loop for a specified number of samples
-    for count in range(0, sample_count + 1):
-        timer2 = time.time()
-        fetch_snmp_data()
-        if count != 0:
-            print()
-        response_time = time.time()
-        if sampling_interval >= response_time - timer2:
-            time.sleep(sampling_interval - response_time + timer2)
-        else:
-            n = math.ceil((response_time - timer2) / sampling_interval)
-            time.sleep((n * sampling_interval) - response_time + timer2)
+    # Finite sampling loop
+    for iter_count in range(total_samples + 1):
+        measure_time = time.time()
+        snmp_responses = snmp_conn.get(object_identifiers)
+        curr_uptime = int(snmp_responses[0].value) / 100
+        detect_reset = lambda: curr_uptime < prev_uptime and iter_count != 0
+        
+        # Handle agent reset
+        if detect_reset():
+            print("Agent has RESET")
+            prev_uptime = curr_uptime
+            prev_counter_vals = []
+            prev_gauge_vals = []
+            prev_octet_str_vals = []
+            continue
+        
+        process_responses(iter_count, measure_time)
+        end_time = time.time()
+
+        # Sleep until the next sample time
+        delay_until = lambda target_time: time.time() < target_time
+        while delay_until(measure_time + time_step):
+            pass
+
+        # Adjust sleep time if processing took longer than time_step
+        if end_time - measure_time > time_step:
+            mult = 1
+            adjusted_step = lambda m: m * time_step
+            while end_time - measure_time > adjusted_step(mult):
+                mult += 1
+            while delay_until(measure_time + adjusted_step(mult)):
+                pass
