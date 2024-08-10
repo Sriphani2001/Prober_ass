@@ -6,16 +6,16 @@ from easysnmp import Session
 
 def parse_arguments():
     # Parse command line arguments: target info, sample rate, total samples, and OIDs
-    targetinfo = sys.argv[1]
-    targetaddress, target_port, target_community = targetinfo.split(":")
-    sample_rate = float(sys.argv[2])
-    total_samples = int(sys.argv[3])
+    target_info = sys.argv[1]
+    targetaddress, targetport, targetcommunity = target_info.split(":")
+    samprate = float(sys.argv[2])
+    tot_samp = int(sys.argv[3])
     oids = sys.argv[4:]
-    return targetaddress, target_port, target_community, sample_rate, total_samples, oids
+    return targetaddress, targetport, targetcommunity, samprate, tot_samp, oids
 
-def initialize_session(targetaddress, target_port, target_community):
+def initialize_session(targetaddress, targetport, targetcommunity):
     # Initialize the SNMP session
-    return Session(hostname=targetaddress, remote_port=target_port, community=target_community, version=2, timeout=1, retries=1)
+    return Session(hostname=targetaddress, remote_port=targetport, community=targetcommunity, version=2, timeout=1, retries=1)
 
 def handle_reset(current_uptime, previous_uptime, iteration_count):
     # Check if the agent has reset based on the uptime values
@@ -24,17 +24,17 @@ def handle_reset(current_uptime, previous_uptime, iteration_count):
         return True
     return False
 
-def process_responses(snmp_responses, previous_values, current_uptime, previous_uptime, iteration_count, measurement_time):
-    current_counter_values, gauge_values, octet_values = [], [], []
+def process_responses(snmp_resp, prev_vals, current_uptime, previous_uptime, iteration_count, measu_time):
+    current_counter_values, gauge_values, octet_values, timeticks_values = [], [], [], []
     if iteration_count != 0:
-        print(f"{measurement_time}|", end='')
+        print(f"{measu_time}|", end='')
 
     # Filter out invalid SNMP responses
-    validdata = [(response.value, response.snmp_type) 
-                  for response in snmp_responses[1:] 
-                  if response.value not in ['NOSUCHOBJECT', 'NOSUCHINSTANCE']]
+    validdata = [(resp.value, resp.snmp_type) 
+                  for resp in snmp_resp[1:] 
+                  if resp.value not in ['NOSUCHOBJECT', 'NOSUCHINSTANCE']]
     
-    # Categorize the SNMP response values
+    # Categorize the SNMP resp values
     for value, data_type in validdata:
         if data_type == 'GAUGE':
             gauge_values.append(int(value))
@@ -42,17 +42,21 @@ def process_responses(snmp_responses, previous_values, current_uptime, previous_
             current_counter_values.append((int(value), data_type))
         elif data_type == 'OCTET_STR':
             octet_values.append(value)
+        elif data_type == 'TIMETICKS':
+            timeticks_values.append(int(value))
     
     # Print and compute the differences for the current iteration
     if iteration_count != 0:
-        print_gauges(gauge_values, previous_values['gauge'])
-        print_counters(current_counter_values, previous_values['counter'], current_uptime, previous_uptime)
+        print_gauges(gauge_values, prev_vals['gauge'])
+        print_counters(current_counter_values, prev_vals['counter'], current_uptime, previous_uptime)
+        print_timeticks(timeticks_values, prev_vals['timeticks'])
         print_octets(octet_values)
     
     # Update previous values
-    previous_values['counter'] = [value for value, _ in current_counter_values]
-    previous_values['gauge'] = gauge_values
-    previous_values['uptime'] = current_uptime
+    prev_vals['counter'] = [value for value, _ in current_counter_values]
+    prev_vals['gauge'] = gauge_values
+    prev_vals['timeticks'] = timeticks_values
+    prev_vals['uptime'] = current_uptime
     
     if iteration_count != 0:
         print()
@@ -75,6 +79,13 @@ def print_counters(current_counters, previous_counters, current_uptime, previous
             rate = int(delta / time_delta)
             print(f"{rate}|", end='')
 
+def print_timeticks(current_timeticks, previous_timeticks):
+    # Calculate and print timeticks deltas
+    if previous_timeticks:
+        timeticks_deltas = [(current, current - previous) for current, previous in zip(current_timeticks, previous_timeticks)]
+        for current, delta in timeticks_deltas:
+            print(f"{delta}|", end='')
+
 def print_octets(octet_values):
     # Print octet string values
     for value in octet_values:
@@ -82,47 +93,46 @@ def print_octets(octet_values):
 
 def main():
     # Main function to initialize SNMP session and process responses
-    targetaddress, target_port, target_community, sample_rate, total_samples, oids = parse_arguments()
-    time_step = 1 / sample_rate
-    snmp_connection = initialize_session(targetaddress, target_port, target_community)
+    targetaddress, targetport, targetcommunity, samprate, tot_samp, oids = parse_arguments()
+    time_step = 1 / samprate
+    snmp_connection = initialize_session(targetaddress, targetport, targetcommunity)
     oids.insert(0, '1.3.6.1.2.1.1.3.0')  # Adding the system uptime OID
     
-    previous_values = {'counter': [], 'gauge': [], 'uptime': 0}
+    prev_vals = {'counter': [], 'gauge': [], 'timeticks': [], 'uptime': 0}
     
-    if total_samples == -1:
+    if tot_samp == -1:
         iteration_count = 0
         while True:
             start_time = time.perf_counter()
-            measurement_time = int(time.time())
+            measu_time = int(time.time())
             try:
-                snmp_responses = snmp_connection.get(oids)
-                current_uptime = int(snmp_responses[0].value) / 100
-                if handle_reset(current_uptime, previous_values['uptime'], iteration_count):
-                    previous_values = {'counter': [], 'gauge': [], 'uptime': current_uptime}
+                snmp_resp = snmp_connection.get(oids)
+                current_uptime = int(snmp_resp[0].value) / 100
+                if handle_reset(current_uptime, prev_vals['uptime'], iteration_count):
+                    prev_vals = {'counter': [], 'gauge': [], 'timeticks': [], 'uptime': current_uptime}
                     continue
-                process_responses(snmp_responses, previous_values, current_uptime, previous_values['uptime'], iteration_count, measurement_time)
+                process_responses(snmp_resp, prev_vals, current_uptime, prev_vals['uptime'], iteration_count, measu_time)
                 iteration_count += 1
             except easysnmp.exceptions.EasySNMPTimeoutError:
-                print(f"{measurement_time}| Timeout")
-            
+                print(f"{measu_time}| Timeout")
+
             end_time = time.perf_counter()
             elapsed_time = end_time - start_time
             sleep_time = max(0, time_step - elapsed_time)
             time.sleep(sleep_time)
     else:
-        for iteration_count in range(total_samples + 1):
+        for iteration_count in range(tot_samp + 1):
             start_time = time.perf_counter()
-            measurement_time = int(time.time())
+            measu_time = int(time.time())
             try:
-                snmp_responses = snmp_connection.get(oids)
-                current_uptime = int(snmp_responses[0].value) / 100
-                if handle_reset(current_uptime, previous_values['uptime'], iteration_count):
-                    previous_values = {'counter': [], 'gauge': [], 'uptime': current_uptime}
+                snmp_resp = snmp_connection.get(oids)
+                current_uptime = int(snmp_resp[0].value) / 100
+                if handle_reset(current_uptime, prev_vals['uptime'], iteration_count):
+                    prev_vals = {'counter': [], 'gauge': [], 'timeticks': [], 'uptime': current_uptime}
                     continue
-                process_responses(snmp_responses, previous_values, current_uptime, previous_values['uptime'], iteration_count, measurement_time)
+                process_responses(snmp_resp, prev_vals, current_uptime, prev_vals['uptime'], iteration_count, measu_time)
             except easysnmp.exceptions.EasySNMPTimeoutError:
-                print(f"{measurement_time}| Timeout")
-            
+                print(f"{measu_time}| Timeout")
             end_time = time.perf_counter()
             elapsed_time = end_time - start_time
             sleep_time = max(0, time_step - elapsed_time)
